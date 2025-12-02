@@ -45,7 +45,18 @@ DEALINGS IN THE SOFTWARE.
 //
 // General constants 
 //
-#define MICROBIT_USB_FLASH_MAX_RETRIES              4
+#ifndef MICROBIT_USB_FLASH_MAX_TX_RETRIES
+#define MICROBIT_USB_FLASH_MAX_TX_RETRIES           20
+#endif
+
+#ifndef MICROBIT_USB_FLASH_MAX_RX_RETRIES
+#define MICROBIT_USB_FLASH_MAX_RX_RETRIES           20
+#endif
+
+#ifndef MICROBIT_USB_FLASH_MAX_FLASH_STORAGE
+#define MICROBIT_USB_FLASH_MAX_FLASH_STORAGE        0x1F000
+#endif
+
 
 //
 // Command codes for the USB Interface Chip
@@ -63,6 +74,9 @@ DEALINGS IN THE SOFTWARE.
 #define MICROBIT_USB_FLASH_WRITE_CMD                0x0B            // Perform a WRITE operation from applicaiton FLASH memory.
 #define MICROBIT_USB_FLASH_ERASE_CMD                0x0C            // Perform a ERASE operation from applicaiton FLASH memory.
 
+namespace codal
+{
+
 typedef struct
 {
     ManagedString       fileName;                                   // MUST be in 8.3 format
@@ -72,7 +86,7 @@ typedef struct
 
 typedef struct
 {
-    uint16_t            blockSize;                                  // The size of a physival blovk on the disk
+    uint16_t            blockSize;                                  // The size of a physical block on the disk
     uint8_t             blockCount;                                 // The number of available blocks on the disk
 } MicroBitUSBFlashGeometry;
 
@@ -83,6 +97,10 @@ typedef struct
 #define MICROBIT_USB_FLASH_AWAITING_RESPONSE        0x01
 #define MICROBIT_USB_FLASH_GEOMETRY_LOADED          0x02
 #define MICROBIT_USB_FLASH_CONFIG_LOADED            0x04
+#define MICROBIT_USB_FLASH_SINGLE_PAGE_ERASE_ONLY   0x08
+#define MICROBIT_USB_FLASH_USE_NULL_TRANSACTION     0x10
+#define MICROBIT_USB_FLASH_BUSY_FLAG_SUPPORTED      0x20
+#define MICROBIT_USB_FLASH_100MS_AFTER_ERASE        0x40
 
 
 /**
@@ -96,6 +114,7 @@ class MicroBitUSBFlashManager : public CodalComponent, public NVMController
         MicroBitPowerManager        &power;                             // Reference to power manager instance
         MicroBitUSBFlashConfig      config;                             // Current configuration of the USB File interface
         MicroBitUSBFlashGeometry    geometry;                           // Current geomtry of the USB File interface
+        int                         maxWriteLength;                     // The maximum number of bytes that can be written in a single transaction.
 
     public:
         /**
@@ -151,7 +170,7 @@ class MicroBitUSBFlashManager : public CodalComponent, public NVMController
         int eraseConfig();
 
         /**
-         * Reads data from the specified location in the USB file staorage area.
+         * Reads data from the specified location in the USB file storage area.
          * 
          * @param address the logical address of the memory to read.
          * @param length the number of 32-bit words to read.
@@ -259,6 +278,7 @@ class MicroBitUSBFlashManager : public CodalComponent, public NVMController
          * @return a buffer containing the response to the request, or a zero length buffer on failure.
          */
         ManagedBuffer transact(ManagedBuffer request, int responseLength);
+        ManagedBuffer _transact(ManagedBuffer request, int responseLength);
 
         /**
          * Performs a flash storage transaction with the interface chip.
@@ -273,4 +293,7 @@ class MicroBitUSBFlashManager : public CodalComponent, public NVMController
         bool isValidChar(char c);
 
 };
+
+} // namespace codal
+
 #endif

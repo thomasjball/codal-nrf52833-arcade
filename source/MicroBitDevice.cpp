@@ -26,6 +26,7 @@ DEALINGS IN THE SOFTWARE.
 #include "MicroBitDevice.h"
 #include "nrf.h"
 #include "hal/nrf_gpio.h"
+#include "cmsis_compiler.h"
 
 #ifdef SOFTDEVICE_PRESENT
 #include "nrf_sdm.h"
@@ -47,6 +48,14 @@ MicroBitDevice::MicroBitDevice()
 }
 
 namespace codal {
+
+/**
+  * Perfom scheduler idle
+  */
+void MicroBitDevice::schedulerIdle()
+{
+}
+
 
 /**
   * Seed the pseudo random number generator using the hardware random number generator.
@@ -93,8 +102,7 @@ void MicroBitDevice::seedRandom()
   */
 int MicroBitDevice::seedRandom(uint32_t seed)
 {
-    CodalDevice::seedRandom(seed);
-    return DEVICE_OK;
+    return CodalDevice::seedRandom(seed);
 }
 
 
@@ -174,10 +182,23 @@ bool ble_running()
 /**
   * Perform a hard reset of the micro:bit.
   */
-void
-microbit_reset()
+__NO_RETURN void microbit_reset()
 {
     NVIC_SystemReset();
+
+    // __NO_RETURN added to NVIC_SystemReset() in CMSIS V5.0.5
+    // Currently using V5.0.3, so this can be removed if updated in the future
+    // Looks like it gets compiled out anyway
+    for (;;);
+}
+
+/**
+  * For DAL compatibility, determine the version of DAL/CODAL currently running.
+  * @return a pointer to a character buffer containing a representation of the semantic version number.
+  */
+const char * microbit_dal_version()
+{
+    return MICROBIT_DAL_VERSION;
 }
 
 /**
@@ -378,7 +399,7 @@ void microbit_panic_timeout(int iterations)
     panic_timeout = iterations;
 }
 
-void microbit_panic( int statusCode)
+__NO_RETURN void microbit_panic( int statusCode)
 {
     const microbit_LEDMapStr &mm = microbit_LEDMap;
     uint8_t chr;
@@ -455,8 +476,18 @@ __attribute__((weak)) void target_panic( int statusCode)
 
 extern "C"
 {
-__attribute__((weak)) int __wrap_atexit(void (*function)(void)) {
+
+__attribute__((weak)) int __wrap_atexit(void (*function)(void))
+{
     return -1;
 }
 
+} // extern "C"
+
+__attribute__((weak)) void target_scheduler_idle()
+{
+    if ( microbit_device_instance)
+        microbit_device_instance->schedulerIdle();
+    else
+        target_wait_for_event();
 }

@@ -24,11 +24,11 @@ DEALINGS IN THE SOFTWARE.
 
 #include "MicroBitUSBFlashManager.h"
 
-#define KL27_FLASH_ERASE_WORKAROUND 1
+using namespace codal;
 
 static const KeyValueTableEntry usbFlashPropertyLengthData[] = {
     {MICROBIT_USB_FLASH_FILENAME_CMD, 12},
-    {MICROBIT_USB_FLASH_FILESIZE_CMD, 2},
+    {MICROBIT_USB_FLASH_FILESIZE_CMD, 5},
     {MICROBIT_USB_FLASH_VISIBILITY_CMD, 2},
     {MICROBIT_USB_FLASH_WRITE_CONFIG_CMD, 1},
     {MICROBIT_USB_FLASH_ERASE_CONFIG_CMD, 1},
@@ -50,6 +50,10 @@ CREATE_KEY_VALUE_TABLE(usbFlashPropertyLength, usbFlashPropertyLengthData);
 MicroBitUSBFlashManager::MicroBitUSBFlashManager(MicroBitI2C &i2c, MicroBitIO &ioPins, MicroBitPowerManager &powerManager, uint16_t id) : i2cBus(i2c), io(ioPins), power(powerManager)
 {
     this->id = id;
+    this->maxWriteLength = 64;
+
+    // Be pessimistic about the interface chip in use, until we obtain version information.
+    status = (MICROBIT_USB_FLASH_SINGLE_PAGE_ERASE_ONLY | MICROBIT_USB_FLASH_USE_NULL_TRANSACTION);
 }
 
 /**
@@ -67,11 +71,22 @@ MicroBitUSBFlashConfig MicroBitUSBFlashManager::getConfiguration()
 
         // Load the configured filename
         response = transact(MICROBIT_USB_FLASH_FILENAME_CMD);
-        config.fileName = response;
+        if (response.length() > 5)
+        {
+            ManagedBuffer n = response.slice(1, response.length()-1);
+            n[n.length()-4] = '.';
+            config.fileName = n;
+        }
 
         // Load the filesize
         response = transact(MICROBIT_USB_FLASH_FILESIZE_CMD);
-        config.fileSize = response[1];
+        uint32_t s;
+        memcpy(&s, &response[1], 4);
+        config.fileSize = htonl(s);
+
+        // Sanity check that the filesize isnt longer than the possible block count
+        if( config.fileSize > MICROBIT_USB_FLASH_MAX_FLASH_STORAGE )
+            config.fileSize = MICROBIT_USB_FLASH_MAX_FLASH_STORAGE;
 
         // Load the visibility status
         response = transact(MICROBIT_USB_FLASH_VISIBILITY_CMD);
@@ -103,7 +118,7 @@ bool MicroBitUSBFlashManager::isValidChar(char c)
 int MicroBitUSBFlashManager::setConfiguration(MicroBitUSBFlashConfig config, bool persist)
 {
     ManagedBuffer fname(12);
-    ManagedBuffer fsize(2);
+    ManagedBuffer fsize(5);
     ManagedBuffer fvisible(2);
 
     int dots = 0;
@@ -113,7 +128,7 @@ int MicroBitUSBFlashManager::setConfiguration(MicroBitUSBFlashConfig config, boo
     getGeometry();
 
     // If the requested file is too long/short, we can't proceed.
-    if (config.fileSize <= 0 || 1024 * config.fileSize >= geometry.blockSize*geometry.blockCount)
+    if (config.fileSize <= 0 || config.fileSize > geometry.blockSize*geometry.blockCount)
         return MICROBIT_INVALID_PARAMETER;
 
     // Validate filename as fixed length 8.3 format, as required by USB interface chip.
@@ -122,7 +137,7 @@ int MicroBitUSBFlashManager::setConfiguration(MicroBitUSBFlashConfig config, boo
         if (config.fileName.charAt(i) =='.')
             dots++;
         else if (!isValidChar(config.fileName.charAt(i)))
-            invalidChar = true;        
+            invalidChar = true;
     }
 
     // Blimey 8.3 is complex. :)
@@ -144,7 +159,8 @@ int MicroBitUSBFlashManager::setConfiguration(MicroBitUSBFlashConfig config, boo
 
     // Encode file size command.
     fsize[0] = MICROBIT_USB_FLASH_FILESIZE_CMD;
-    fsize[1] = config.fileSize;
+    uint32_t s = htonl(config.fileSize);
+    memcpy(&fsize[1], &s, 4);
 
     // Encode visibility command
     fvisible[0] = MICROBIT_USB_FLASH_VISIBILITY_CMD;
@@ -152,7 +168,7 @@ int MicroBitUSBFlashManager::setConfiguration(MicroBitUSBFlashConfig config, boo
 
     // Write out each of the parameters in turn.
     transact(fname, 12);
-    transact(fsize, 2);
+    transact(fsize, 5);
     transact(fvisible, 2);
 
     if (persist)
@@ -193,7 +209,37 @@ MicroBitUSBFlashGeometry MicroBitUSBFlashManager::getGeometry()
         else
             valid = false;
 
-        // Esnure we don't cache invalid state.
+        // Optimize behaviour for the interface chip version in use.
+        if (valid)
+        {
+            // Apply FLASH storage limiting policy to align V2.0 and V2.2 device capabilities.
+            if (geometry.blockCount * geometry.blockSize > MICROBIT_USB_FLASH_MAX_FLASH_STORAGE)
+                geometry.blockCount = MICROBIT_USB_FLASH_MAX_FLASH_STORAGE / geometry.blockSize;
+
+            MicroBitVersion v = power.getVersion();
+            switch(v.i2c)
+            {
+                case 1:
+                    // Apply workarounds for V2.00 KL27 release, and V2.2 NRF528xx rev1 release.
+                    maxWriteLength = 64;
+                    status |= (MICROBIT_USB_FLASH_SINGLE_PAGE_ERASE_ONLY | MICROBIT_USB_FLASH_USE_NULL_TRANSACTION);
+                    break;
+
+                case 2:
+                default:
+                    // Apply/disable workarounds for KL27/NRF528xx rev2 release.
+                    maxWriteLength = 64;
+                    status &= ~MICROBIT_USB_FLASH_USE_NULL_TRANSACTION;
+                    status |= MICROBIT_USB_FLASH_BUSY_FLAG_SUPPORTED;
+                    status |= MICROBIT_USB_FLASH_SINGLE_PAGE_ERASE_ONLY;
+            }
+
+            // If we have a V2.2 NRF52 based DAPLink revision, apply an additional 100ms delay following a FLASH_ERASE command.
+            if (v.board == 0x9905 || v.board == 0x9906)
+                status |= MICROBIT_USB_FLASH_100MS_AFTER_ERASE;
+        }
+
+        // Ensure we don't cache invalid state.
         if (valid)
             status |= MICROBIT_USB_FLASH_GEOMETRY_LOADED;
     }
@@ -291,8 +337,8 @@ MicroBitUSBFlashManager::read(uint32_t* dest, uint32_t address, uint32_t length)
  * Writes data to the specified location in the USB file staorage area.
  * 
  * @param data a buffer containing the data to write
- * @param address the location to write to
- * @param length the number of bytes to write
+ * @param address the location to write to. Must be 32 bit aligned.
+ * @param length the number of 32 bit words to write
  * 
  * @return DEVICE_OK on success, or error code.
  */
@@ -301,30 +347,35 @@ int MicroBitUSBFlashManager::write(uint32_t address, uint32_t *data, uint32_t le
     // Convert length parameter from 32-bit count to a byte count.
     length = length * sizeof(uint32_t);
 
-    // Ensure address and length is 32 bit aligned (KL27 requirement)
-    // Calculate word aligned address and length parameters taking into account any necessary padding
-    int writeAddress = (address / 4) * 4;
-    int padding1 = address - writeAddress;
-    int padding2 = ((writeAddress + padding1 + length) % 4) == 0 ? 0 : 4 - ((writeAddress + padding1 + length) % 4);
-    int writeLength = length + padding1 + padding2;
-
-    ManagedBuffer request(writeLength + 8);
     ManagedBuffer response;
 
-    // Ensure any padding bytes to 0xFF
+    ManagedBuffer request(min(maxWriteLength, length) + 8);
     request.fill(0xFF);
 
-    // Add header and user data
-    uint32_t *p = (uint32_t *) &request[0];
-    *p++ = htonl(((uint32_t) writeAddress) | (MICROBIT_USB_FLASH_WRITE_CMD << 24));
-    *p++ = htonl(writeLength);
-    memcpy(((uint8_t *)p) + padding1, &data[0], length);
+    uint32_t p = address;
+    uint32_t end = p + length;
+    uint32_t bytesWritten = 0;
+    uint32_t segmentLength;
 
-    response = transact(request, 9);
+    while (p < end)
+    {
+        segmentLength = min(maxWriteLength, length-bytesWritten);
+        
+        uint32_t *ptr = (uint32_t *) &request[0];
+        *ptr++ = htonl( p | (MICROBIT_USB_FLASH_WRITE_CMD << 24));
+        *ptr++ = htonl(segmentLength);
+        memcpy(ptr, data + (bytesWritten/4), segmentLength);
 
-    if (response.length() == 0)
-        return DEVICE_I2C_ERROR;
-    
+        request.truncate(segmentLength + 8);
+        response = transact(request, 9);
+
+        if (response.length() == 0)
+            return DEVICE_I2C_ERROR;
+
+        bytesWritten += segmentLength;
+        p+= segmentLength;
+    }
+
     return DEVICE_OK;
 }
 
@@ -392,12 +443,27 @@ int MicroBitUSBFlashManager::erase(uint32_t address, uint32_t length)
             restoreBuffer2 = read(address + length, restoreLength2/sizeof(uint32_t));
     }
 
-#ifdef KL27_FLASH_ERASE_WORKAROUND
-    for (uint32_t page = eraseStart; page <= eraseEnd; page += geometry.blockSize)
+    if (status & MICROBIT_USB_FLASH_SINGLE_PAGE_ERASE_ONLY)
+    {
+        for (uint32_t page = eraseStart; page <= eraseEnd; page += geometry.blockSize)
+        {
+            uint32_t *p = (uint32_t *) &request[0];
+            *p++ = htonl(page | (MICROBIT_USB_FLASH_ERASE_CMD << 24));
+            *p++ = htonl(page);
+
+            response = transact(request, 1);
+            if (response.length() == 0)
+            {
+                DMESG("ERROR ERASING");
+                return DEVICE_I2C_ERROR;
+            }
+        }
+    }
+    else
     {
         uint32_t *p = (uint32_t *) &request[0];
-        *p++ = htonl(page | (MICROBIT_USB_FLASH_ERASE_CMD << 24));
-        *p++ = htonl(page);
+        *p++ = htonl(eraseStart | (MICROBIT_USB_FLASH_ERASE_CMD << 24));
+        *p++ = htonl(eraseEnd);
 
         response = transact(request, 1);
         if (response.length() == 0)
@@ -406,25 +472,6 @@ int MicroBitUSBFlashManager::erase(uint32_t address, uint32_t length)
             return DEVICE_I2C_ERROR;
         }
     }
-
-#else
-    // Workaround until block erasing supported.
-    uint32_t *p = (uint32_t *) &request[0];
-    *p++ = htonl(eraseStart | (MICROBIT_USB_FLASH_ERASE_CMD << 24));
-    *p++ = htonl(eraseEnd);
-
-    DMESG("ERASING: [start: %d] [end: %d]", eraseStart, eraseEnd);
-    for (int i=0; i<request.length();i++)
-        DMESG("%x ", request[i]);
-
-    response = transact(request, 1);
-
-    if (response.length() == 0)
-    {
-        DMESG("ERROR ERASING");
-        return DEVICE_I2C_ERROR;
-    }
-#endif
 
     // Restore any saved data if necessary
     if (restoreBuffer1.length() > 0)
@@ -445,7 +492,7 @@ int
 MicroBitUSBFlashManager::erase(uint32_t page)
 {
     getGeometry();
-    return erase(page, geometry.blockSize);
+    return erase(page, geometry.blockSize/4);
 }
 
 /**
@@ -507,40 +554,98 @@ MicroBitUSBFlashManager::getFlashSize()
  */
 ManagedBuffer MicroBitUSBFlashManager::transact(ManagedBuffer request, int responseLength)
 {
-    int attempts = 0;
-
     power.nop();
-    if (i2cBus.write(MICROBIT_USB_FLASH_I2C_ADDRESS, &request[0], request.length(), false) != DEVICE_OK)
-        return ManagedBuffer();
- 
-    power.awaitingPacket(true);
 
-    while(attempts < MICROBIT_USB_FLASH_MAX_RETRIES)
-    {   
-        fiber_sleep(5);
-
-        if(io.irq1.isActive())
-        {
-            ManagedBuffer b(responseLength);
-
-            power.nop();
-            int r = i2cBus.read(MICROBIT_USB_FLASH_I2C_ADDRESS, &b[0], responseLength, false);
-            
-            if (r == MICROBIT_OK)
-            {               
-                power.awaitingPacket(false);
-                return b;
-            }
-        }
-                  
-        attempts++;
+    if (status & MICROBIT_USB_FLASH_USE_NULL_TRANSACTION)
+    {
+        ManagedBuffer nop_request(1);
+        nop_request[0] = request[0] == MICROBIT_USB_FLASH_VISIBILITY_CMD ? MICROBIT_USB_FLASH_DISK_SIZE_CMD : MICROBIT_USB_FLASH_VISIBILITY_CMD;
+        _transact(nop_request, usbFlashPropertyLength.get(MICROBIT_USB_FLASH_VISIBILITY_CMD));
     }
 
-    DMESG("USB_FLASH: *** IRQ TIMEOUT ***");
+    return _transact(request, responseLength);
+}
+
+/**
+ * Performs a flash storage transaction with the interface chip.
+ * @param packet The data to write to the interface chip as a request operation.
+ * @param responseLength The length of the expected reponse packet.
+ * @return a buffer containing the response to the request, or a zero length buffer on failure.
+ */
+ManagedBuffer MicroBitUSBFlashManager::_transact(ManagedBuffer request, int responseLength)
+{
+    int tx_attempts = 0;
+    int rx_attempts = 0;
+
+    ManagedBuffer b(max(responseLength, 3));
+
+    while(tx_attempts < MICROBIT_USB_FLASH_MAX_TX_RETRIES)
+    {
+        rx_attempts = 0;
+        tx_attempts++;
+
+        power.awaitingPacket(true);
+
+        if (i2cBus.write(MICROBIT_USB_FLASH_I2C_ADDRESS, &request[0], request.length(), false) != DEVICE_OK)
+        {
+            DMESG("TRANSACT: [I2C WRITE ERROR]");
+            fiber_sleep(1);
+            continue;
+        }
+
+        // if we have an erase request, ensure sufficient time is left to process it before checking for a response.
+        // (DAPLink workaround)
+        if (request[0] == MICROBIT_USB_FLASH_ERASE_CMD)
+            fiber_sleep(status & MICROBIT_USB_FLASH_100MS_AFTER_ERASE ? 100 : 20);
+        else
+            fiber_sleep(1);
+
+        while(rx_attempts < MICROBIT_USB_FLASH_MAX_RX_RETRIES)
+        {
+            rx_attempts++;
+
+            if(io.irq1.isActive())
+            {
+                b.fill(0);
+                int r = i2cBus.read(MICROBIT_USB_FLASH_I2C_ADDRESS, &b[0], b.length(), false);
+
+                if (r == MICROBIT_OK)
+                {
+                    if (b[0] == request[0])
+                    {
+                        // We have a valid response. Consume it, and we're done.
+                        power.awaitingPacket(false);
+                        b.truncate(responseLength);
+                        return b;
+                    }
+                    else
+                    {
+                        // We have a negative response. If it's not a FAIL case, treat this as "NOT READY"
+                        // reset RX timeout, as the peripheral is active on our transaction.
+                        // some revisions report busy status explicitly, others do not and we must infer...
+                        bool busy = (status & MICROBIT_USB_FLASH_BUSY_FLAG_SUPPORTED) ? b[0] == 0x20 && b[1] == 0x39 : b[0] == 0x00 || (b[0] == 0x20 && (b[1] == request[0] || b[1] == 0x00));
+
+                        if (busy)
+                            rx_attempts = 0;
+                        else
+                            break;
+                    }
+                }
+                else
+                {
+                    DMESG("TRANSACT: [I2C READ ERROR: %d]",r);
+                    break;
+                }
+            }
+
+            fiber_sleep(1);
+        }
+    }
+
+    DMESG("USB_FLASH: Transaction Failed.");
     power.awaitingPacket(false);
     return ManagedBuffer();
 }
-
 
 /**
  * Performs a flash storage transaction with the interface chip.

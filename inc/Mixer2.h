@@ -39,6 +39,20 @@ DEALINGS IN THE SOFTWARE.
 #define CONFIG_MIXER_DEFAULT_SAMPLERATE 44100
 #endif
 
+// The default sample rate, for when the user does not supply us with anything
+// This applies to both ADC input rates and mixer output rates.
+//
+// This is distinct from CONFIG_MIXER_DEFAULT_SAMPLERATE which sets the mixer's absolute maximum rate
+// whereas this is simply the 'normal' operating rate for audio peripherals.
+#ifndef CONFIG_MIXER_DEFAULT_CHANNEL_SAMPLERATE
+#define CONFIG_MIXER_DEFAULT_CHANNEL_SAMPLERATE  44100
+#endif
+
+#define DEVICE_ID_MIXER 3030
+
+#define DEVICE_MIXER_EVT_SILENCE 1
+#define DEVICE_MIXER_EVT_SOUND   2
+
 
 namespace codal
 {
@@ -75,6 +89,41 @@ public:
      */
     virtual int pullRequest();
     virtual ~MixerChannel() {};
+
+    /**
+     * @brief Changes the volume between 0 and CONFIG_MIXER_INTERNAL_RANGE
+     * 
+     * @param volume A floating point value between 0 and CONFIG_MIXER_INTERNAL_RANGE
+     */
+    void setVolume( float volume ) { this->volume = volume; }
+
+    /**
+     * @brief Gets the volume for this channel (not the overall mixer volume)
+     * 
+     * @return float A floating point value between 0 and CONFIG_MIXER_INTERNAL_RANGE
+     */
+    float getVolume() { return this->volume; }
+
+    /**
+     * @brief Sets the sample rate of this channel.
+     * 
+     * @param rate 
+     */
+    void setSampleRate( float rate ) {
+        this->rate = rate;
+        this->skip = 0.0f;
+        if( this->rate == DATASTREAM_SAMPLE_RATE_UNKNOWN )
+            this->rate = stream->getSampleRate();
+    }
+
+    /**
+     * @brief Gets the sample rate for this channel.
+     * 
+     * @note This may be set to DATASTREAM_SAMPLE_RATE_UNKNOWN if the upstream is unable to determine a correct rate
+     * 
+     * @return float 
+     */
+    float getSampleRate() { return this->rate; }
 };
 
 class Mixer2 : public DataSource
@@ -89,6 +138,9 @@ class Mixer2 : public DataSource
     float           volume;
     uint32_t        orMask;
     float           silenceLevel;
+    bool            silent;
+    CODAL_TIMESTAMP silenceStartTime;
+    CODAL_TIMESTAMP silenceEndTime;
 
 public:
     /**
@@ -98,7 +150,7 @@ public:
      * @param sampleRange (quantization levels) the difference between the maximum and minimum sample level on the output channel
      * @param format The format the mixer will output (DATASTREAM_FORMAT_16BIT_UNSIGNED or DATASTREAM_FORMAT_16BIT_SIGNED)
      */
-    Mixer2(int sampleRate = CONFIG_MIXER_DEFAULT_SAMPLERATE, int sampleRange = CONFIG_MIXER_INTERNAL_RANGE, int format = DATASTREAM_FORMAT_16BIT_UNSIGNED);
+    Mixer2(float sampleRate = CONFIG_MIXER_DEFAULT_SAMPLERATE, int sampleRange = CONFIG_MIXER_INTERNAL_RANGE, int format = DATASTREAM_FORMAT_16BIT_UNSIGNED);
 
     /**
      * Destructor.
@@ -113,7 +165,15 @@ public:
      * @param sampleRate (samples per second) - if set to zero, defaults to the output sample rate of the Mixer
      * @param sampleRange (quantization levels) the difference between the maximum and minimum sample level on the input channel
      */
-    MixerChannel *addChannel(DataSource &stream, int sampleRate = 0, int sampleRange = CONFIG_MIXER_INTERNAL_RANGE);
+    MixerChannel *addChannel(DataSource &stream, float sampleRate = 0.0f, int sampleRange = CONFIG_MIXER_INTERNAL_RANGE);
+
+    /**
+     * Removes a channel from the mixer
+     * 
+     * @param channel The channel pointer to remove
+     * @return int DEVICE_OK if completed successfully
+     */
+    int removeChannel( MixerChannel * channel );
 
     /**
      * Provide the next available ManagedBuffer to our downstream caller, if available.
@@ -126,6 +186,14 @@ public:
      * @sink The component that data will be delivered to, when it is availiable
      */
     virtual void connect(DataSink &sink);
+
+    /**
+     * Determines if this source is connected to a downstream component
+     * 
+     * @return true If a downstream is connected
+     * @return false If a downstream is not connected
+     */
+    bool isConnected();
 
     /**
      * Determines the output format for the Mixer.
@@ -169,7 +237,7 @@ public:
      * @param sampleRate The new sample rate (samples per second) of the mixer output
      * @return DEVICE_OK on success.
      */
-    int setSampleRate(int sampleRate);
+    int setSampleRate(float sampleRate);
 
     /**
      * Determine the sample range used by this Synthesizer,
@@ -182,7 +250,7 @@ public:
      * Determine the sample rate output of this Mixer.
      * @return The sample rate (samples per second) of the mixer output.
      */
-    int getSampleRate();
+    float getSampleRate();
 
     /**
      * Defines an optional bit mask to logical OR with each sample.
@@ -201,6 +269,29 @@ public:
      * @return DEVICE_OK on success or DEVICE_INVALID_PARAMETER.
      */
     int setSilenceLevel(float level);
+    
+    /**
+     * Determines if the mixer is silent
+     * @return true if the mixer is silent
+     */
+    bool isSilent();
+
+    /**
+     * Determines the time at which the mixer has most recently been generating silence 
+     *
+     * @return the system time in microseconds at which the mixer has been continuously 
+     * producing silence on its output, or zero if the mixer is not producing silence.
+     */
+    CODAL_TIMESTAMP getSilenceStartTime();
+
+    /**
+     * Determines the time at which the mixer stopped continuously generating silence 
+     *
+     * @return the system time in microseconds at which the mixer stopped continuously 
+     * producing silence on its output, or zero if the mixer is not producing silence.
+     */
+    CODAL_TIMESTAMP getSilenceEndTime();
+
 
     private:
     void configureChannel(MixerChannel *c);
