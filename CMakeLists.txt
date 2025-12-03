@@ -23,6 +23,7 @@ target_link_libraries(
     codal-nrf52833-arcade
     codal-core
     codal-nrf52
+    codal-microbit-nrf5sdk
 )
 
 # expose it to parent cmake.
