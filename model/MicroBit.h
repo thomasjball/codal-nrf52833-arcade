@@ -71,7 +71,7 @@ DEALINGS IN THE SOFTWARE.
 #include "PulseIn.h"
 #include "neopixel.h"
 
-#include "MESEvents.h"
+// #include "MESEvents.h"
 
 #if CONFIG_ENABLED(DEVICE_BLE)
 #include "MicroBitBLEManager.h"
