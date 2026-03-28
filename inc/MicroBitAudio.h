@@ -28,8 +28,30 @@ DEALINGS IN THE SOFTWARE.
 #include "NRF52PWM.h"
 #include "SoundEmojiSynthesizer.h"
 #include "SoundExpressions.h"
+#include "SampleSource.h"
 #include "Mixer2.h"
 #include "SoundOutputPin.h"
+#include "StreamNormalizer.h"
+#include "StreamSplitter.h"
+#include "LevelDetectorSPL.h"
+#include "LowPassFilter.h"
+
+// Status Flags
+#define MICROBIT_AUDIO_STATUS_DEEPSLEEP       0x0001
+#define CONFIG_DEFAULT_MICROPHONE_GAIN        0.1f
+
+// Configurable options
+#ifndef CONFIG_AUDIO_MIXER_OUTPUT_LATENCY_US
+#define CONFIG_AUDIO_MIXER_OUTPUT_LATENCY_US              (uint32_t) ((CONFIG_MIXER_BUFFER_SIZE/2) * (1000000.0f/44100.0f))
+#endif
+
+#ifndef CONFIG_AUDIO_INPUT_CHANNELS
+#define CONFIG_AUDIO_INPUT_CHANNELS                       4
+#endif
+
+#ifndef CONFIG_AUDIO_DEFAULT_MICROPHONE_SAMPLERATE
+#define CONFIG_AUDIO_DEFAULT_MICROPHONE_SAMPLERATE        11000
+#endif
 
 namespace codal
 {
@@ -41,15 +63,29 @@ namespace codal
         public:
         static MicroBitAudio    *instance;      // Primary instance of MicroBitAudio, on demand activated.
         Mixer2                  mixer;          // Multi channel audio mixer
+        NRF52ADCChannel         *mic;           // Microphone ADC Channel from uBit.IO
+        StreamNormalizer        *processor;     // Stream Normaliser instance
+        StreamSplitter          *splitter;      // Stream Splitter instance (8bit normalized output)
+        StreamSplitter          *rawSplitter;   // Stream Splitter instance (raw input)
+        LevelDetectorSPL        *levelSPL;      // Level Detector SPL instance
+        LowPassFilter           *micFilter;     // Low pass filter to remove high frequency noise on the mic
+        SampleSource            *sampleSource[CONFIG_AUDIO_INPUT_CHANNELS]; // multichannel sample playback capability
 
         private:
+        volatile bool micEnabled;               // State of on board mic
+        volatile bool micSleepState;            // State of on board mic when we went to sleep last
         bool speakerEnabled;                    // State of on board speaker
         bool pinEnabled;                        // State of on auxiliary output pin
-        NRF52Pin &pin;                          // Auxiliary pin to route audio to
+        NRF52Pin *pin;                          // Auxiliary pin to route audio to
         NRF52Pin &speaker;                      // Primary pin for onboard speaker
         SoundEmojiSynthesizer synth;            // Synthesizer used bfor SoundExpressions
         MixerChannel *soundExpressionChannel;   // Mixer channel associated with sound expression audio
         NRF52PWM *pwm;                          // PWM driver used for sound generation (mixer output)
+        NRF52ADC &adc;                          // ADC from MicroBitConstructor
+        NRF52Pin &microphone;                   // Microphone pin passed from MicroBit constructor
+        NRF52Pin &runmic;                       // Runmic pin passed from MicroBit constructor
+
+        int micDriverTimeout;
 
         public:
         SoundExpressions soundExpressions;      // SoundExpression intepreter
@@ -58,7 +94,7 @@ namespace codal
         /**
          * Constructor.
          */
-        MicroBitAudio(NRF52Pin &pin, NRF52Pin &speaker);
+        MicroBitAudio(NRF52Pin &pin, NRF52Pin &speaker, NRF52ADC &adc, NRF52Pin &microphone, NRF52Pin &runmic);
 
         /**
          * Destructor.
@@ -71,9 +107,30 @@ namespace codal
         static void requestActivation();
 
         /**
+          * Activate Mic
+          */
+        void activateMic();
+
+        /**
+          * Dectivate Mic
+          */
+        void deactivateMic();
+
+        /**
+          * Set normaliser gain
+          * @param gain value to set the microphone gain to
+          */
+        void setMicrophoneGain(int gain = 1);
+
+        /**
          * post-constructor initialisation method
          */
         int enable();
+
+        /**
+         * Shut down the audio pipeline
+         */
+        int disable();
 
         /**
          * Get the current volume.
@@ -101,6 +158,20 @@ namespace codal
         bool isSpeakerEnabled();
 
         /**
+         * Query weather the microphone is enabled
+         * 
+         * @return true If the mic pin is enabled
+         * @return false If the mic pin is disabled (The ADC may still be running)
+         */
+        bool isMicrophoneEnabled();
+
+        /**
+         * Query whether any audio is currently being played, from any source.
+         * @return true if audio is being played, false otherwise.
+         */
+        bool isPlaying();
+
+        /**
          * Define which pin on the edge connector is used for audio.
          * @param pin The pin to use for auxiliary audio.
          */
@@ -117,6 +188,13 @@ namespace codal
          * @return true if enabled, false otherwise.
          */
         bool isPinEnabled();
+
+        /**
+          * Puts the component in (or out of) sleep (low power) mode.
+          */
+        virtual int setSleep(bool doSleep) override;
+
+        virtual void periodicCallback();
     };
 }
 

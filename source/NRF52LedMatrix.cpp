@@ -55,6 +55,7 @@ static void display_irq(uint16_t mask)
  */
 NRF52LEDMatrix::NRF52LEDMatrix(NRFLowLevelTimer &displayTimer, const MatrixMap &map, uint16_t id, DisplayMode mode) : Display(map.width, map.height, id), matrixMap(map), timer(displayTimer)
 {
+    rotation = MATRIX_DISPLAY_ROTATION_0;
     enabled = false;
     strobeRow = 0;
     instance = this;
@@ -128,6 +129,20 @@ DisplayMode NRF52LEDMatrix::getDisplayMode()
 }
 
 /**
+  * Rotates the display to the given position.
+  *
+  * Axis aligned values only.
+  *
+  * @code
+  * display.rotateTo(MATRIX_DISPLAY_ROTATION_180); //rotates 180 degrees from original orientation
+  * @endcode
+  */
+void NRF52LEDMatrix::rotateTo(DisplayRotation rotation)
+{
+    this->rotation = rotation;
+}
+
+/**
  * Enables the display, should only be called if the display is disabled.
  *
  * @code
@@ -177,8 +192,12 @@ void NRF52LEDMatrix::disable()
     timer.disableIRQ();
 
     // Disable GPIOTE control of the display pins
+    // FIXME: When GPIOTE is disabled here "system off" consumes almost 1mA @ 3V
+    // It's unclear how changing this peripheral causes the additional power consumption
+    // https://github.com/lancaster-university/codal-microbit-v2/issues/30
     for (int column = 0; column < matrixMap.columns; column++)
         NRF_GPIOTE->CONFIG[gpiote[column]] = 0;
+
 
     // Put all pins into high impedance mode.
     for (int column = 0; column < matrixMap.columns; column++)
@@ -186,6 +205,8 @@ void NRF52LEDMatrix::disable()
 
     for (int row = 0; row < matrixMap.rows; row++)
          matrixMap.rowPins[row]->getDigitalValue();
+
+    status &= ~NRF52_LEDMATRIX_STATUS_LIGHTREADY;
 
     enabled = false;
 }
@@ -208,7 +229,8 @@ void NRF52LEDMatrix::render()
     {
         // We just completed a light sense strobe. Record the light level sensed.
         lightLevel = 255 - ((255 * timer.timer->CC[1]) / (timerPeriod * NRF52_LED_MATRIX_LIGHTSENSE_STROBES));
-        
+        status |= NRF52_LEDMATRIX_STATUS_LIGHTREADY;
+
         // Restore the hardware configuration into LED drive mode.
         status |= NRF52_LEDMATRIX_STATUS_RESET;
         setDisplayMode(mode);
@@ -227,7 +249,24 @@ void NRF52LEDMatrix::render()
 
         for (int column = 0; column < matrixMap.columns; column++)
         {
-            value = screenBuffer[p->y * width + p->x];
+            switch ( this->rotation)
+            {
+              case MATRIX_DISPLAY_ROTATION_0:
+                value = screenBuffer[ p->y * width + p->x];
+                break;
+              case MATRIX_DISPLAY_ROTATION_90:
+                value = screenBuffer[ p->x * width + width - 1 - p->y];
+                break;
+              case MATRIX_DISPLAY_ROTATION_180:
+                value = screenBuffer[ (height - 1 - p->y) * width + width - 1 - p->x];
+                break;
+              case MATRIX_DISPLAY_ROTATION_270:
+                value = screenBuffer[ ( height - 1 - p->x) * width + p->y];
+                break;
+              default:
+                value = screenBuffer[ p->y * width + p->x];
+                break;
+            }
 
             // Clip pixels to full or zero brightness if in black and white mode.
             if (mode == DISPLAY_MODE_BLACK_AND_WHITE || mode == DISPLAY_MODE_BLACK_AND_WHITE_LIGHT_SENSE)
@@ -320,23 +359,21 @@ int NRF52LEDMatrix::setBrightness(int b)
 int 
 NRF52LEDMatrix::readLightLevel()
 {
-    bool modeChanged = false;
-
     // Auto-enable light sensing if it is currently disabled
     if (mode == DisplayMode::DISPLAY_MODE_BLACK_AND_WHITE)
     {
         setDisplayMode(DisplayMode::DISPLAY_MODE_BLACK_AND_WHITE_LIGHT_SENSE);
-        modeChanged = true;
+        status &= ~NRF52_LEDMATRIX_STATUS_LIGHTREADY;
     }
 
     if (mode == DisplayMode::DISPLAY_MODE_GREYSCALE)
     {
         setDisplayMode(DisplayMode::DISPLAY_MODE_GREYSCALE_LIGHT_SENSE);
-        modeChanged = true;
+        status &= ~NRF52_LEDMATRIX_STATUS_LIGHTREADY;
     }
 
     // if we've just enabled light sensing, ensure we have a valid reading before returning.
-    if (modeChanged)
+    if ( ( status & NRF52_LEDMATRIX_STATUS_LIGHTREADY) == 0)
         fiber_sleep(1500.0f/((float)NRF52_LED_MATRIX_FREQUENCY));
 
     return lightLevel;

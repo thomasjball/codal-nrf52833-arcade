@@ -43,6 +43,11 @@ namespace codal
          */
         MicroBitDevice();
 
+       /**
+        * Perfom scheduler idle
+        */
+       virtual void schedulerIdle();
+
         /**
          * Seed the pseudo random number generator using the hardware random number generator.
          *
@@ -91,7 +96,7 @@ namespace codal
     void microbit_reset();
 
     /**
-     * Determine the version of microbit-dal currently running.
+     * For DAL compatibility, determine the version of DAL/CODAL currently running.
      * @return a pointer to a character buffer containing a representation of the semantic version number.
      */
     const char * microbit_dal_version();
@@ -105,7 +110,7 @@ namespace codal
      * microbit_panic(20);
      * @endcode
      */
-    void microbit_panic(int statusCode);
+    [[noreturn]] void microbit_panic(int statusCode);
 
     /**
      * Defines the length of time that the device will remain in a error state before resetting.
@@ -164,7 +169,5 @@ namespace codal
 };
 
 extern codal::MicroBitDevice *microbit_device_instance;
-
-using namespace codal;
 
 #endif

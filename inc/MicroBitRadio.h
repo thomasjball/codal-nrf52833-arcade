@@ -35,6 +35,7 @@ namespace codal
 #include "CodalConfig.h"
 #include "codal-core/inc/types/Event.h"
 #include "PacketBuffer.h"
+#include "MicroBitConfig.h"
 #include "MicroBitRadioDatagram.h"
 #include "MicroBitRadioEvent.h"
 
@@ -63,16 +64,24 @@ namespace codal
 
 // Status Flags
 #define MICROBIT_RADIO_STATUS_INITIALISED       0x0001
+#define MICROBIT_RADIO_STATUS_DEEPSLEEP_IRQ     0x0002
+#define MICROBIT_RADIO_STATUS_DEEPSLEEP_INIT    0x0004
 
 // Default configuration values
 #define MICROBIT_RADIO_BASE_ADDRESS             0x75626974
 #define MICROBIT_RADIO_DEFAULT_GROUP            0
-#define MICROBIT_RADIO_DEFAULT_TX_POWER         7
+#define MICROBIT_RADIO_DEFAULT_TX_POWER         6
 #define MICROBIT_RADIO_DEFAULT_FREQUENCY        7
-#define MICROBIT_RADIO_MAX_PACKET_SIZE          32
 #define MICROBIT_RADIO_HEADER_SIZE              4
 #define MICROBIT_RADIO_MAXIMUM_RX_BUFFERS       4
-#define MICROBIT_RADIO_POWER_LEVELS             10
+#define MICROBIT_RADIO_POWER_LEVELS             8
+
+// Max packet size is configurable, so ensure maximum value is not exceeded
+// TODO: Update this value once issue codal-microbit-v2#383 is resolved
+// https://github.com/lancaster-university/codal-microbit-v2/issues/383
+#if MICROBIT_RADIO_MAX_PACKET_SIZE > 250
+    #error "MICROBIT_RADIO_MAX_PACKET_SIZE cannot be larger than 250 bytes"
+#endif
 
 // Known Protocol Numbers
 #define MICROBIT_RADIO_PROTOCOL_DATAGRAM        1       // A simple, single frame datagram. a little like UDP but with smaller packets. :-)
@@ -98,6 +107,8 @@ namespace codal
 
     class MicroBitRadio : CodalComponent
     {
+        uint8_t                 band;       // The radio transmission and reception frequency band.
+        uint8_t                 power;      // The radio output power level of the transmitter.
         uint8_t                 group;      // The radio group to which this micro:bit belongs.
         uint8_t                 queueDepth; // The number of packets in the receiver queue.
         int                     rssi;
@@ -231,6 +242,11 @@ namespace codal
          * @return MICROBIT_OK on success, or MICROBIT_NOT_SUPPORTED if the BLE stack is running.
          */
         int send(FrameBuffer *buffer);
+
+        /**
+          * Puts the component in (or out of) sleep (low power) mode.
+          */
+        virtual int setSleep(bool doSleep) override;
     };
 }
 
